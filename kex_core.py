@@ -51,10 +51,11 @@ class Model3DInterpreter:
     def apply_global_transform_normal(self, vector):
         """Transformação dedicada para normais.
 
-        Somente inverte o eixo X, preservando Y e Z. Usado para evitar que
-        normais sofram transformações extras que distorcem a iluminação.
+        O addon original do Blender aplica a matriz global seguida de
+        ``(x, -y, -z)``. Como aqui não usamos ``global_matrix`` diretamente,
+        espelhamos nos eixos Y e Z para manter a orientação correta.
         """
-        return (-vector[0], vector[1], vector[2])
+        return (vector[0], -vector[1], -vector[2])
     
     def extract_texture_index(self, filename):
         """Extrai índice de textura do nome do arquivo"""
@@ -1332,31 +1333,26 @@ class KEXCore:
         return True
 
     def _sync_mesh_skin_indices(self):
-        """Reordenar vértices do mesh conforme índices do skin.
-
-        O reordenamento é aplicado apenas se o arquivo de skin definir uma
-        permutação clara dos vértices do mesh. Essa verificação evita distorções
-        quando os índices já correspondem à ordem original.
-        """
+        """Aplicar vértices do skin ao mesh e validar índices."""
         if not self.current_mesh or not self.current_skin:
             return
 
-        indices = self.current_skin.get('indices', [])
         verts = self.current_mesh.get('verts', {})
         locs = verts.get('loc', [])
-        normals = verts.get('normals', [])
+        indices = self.current_skin.get('indices', [])
+        skin_verts = self.current_skin.get('verts', [])
 
-        if len(indices) == len(locs):
-            seq = list(range(len(locs)))
-            if sorted(indices) == seq and indices != seq:
-                try:
-                    reordered_loc = [locs[i] for i in indices]
-                    reordered_normals = [normals[i] for i in indices]
-                    self.current_mesh['verts']['loc'] = reordered_loc
-                    self.current_mesh['verts']['normals'] = reordered_normals
-                    print("🔄 Vértices reordenados conforme SKN")
-                except Exception as e:
-                    print(f"⚠️ Falha ao reordenar vértices: {e}")
+        if len(skin_verts) == len(locs):
+            try:
+                self.current_mesh['verts']['loc'] = skin_verts.copy()
+                print("🔧 Vértices substituídos pelos do SKN")
+            except Exception as e:
+                print(f"⚠️ Não foi possível aplicar vértices do SKN: {e}")
+
+        if len(indices) != len(locs):
+            print("⚠️ Índices do SKN não correspondem ao número de vértices")
+        elif sorted(indices) != list(range(len(locs))):
+            print("⚠️ Índices do SKN possuem ordem inesperada")
     
     def get_system_status(self):
         """Status completo do sistema"""
