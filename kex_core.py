@@ -753,8 +753,10 @@ class AnimationSystem:
         self._interpolation_cache = {}
         self._cache_clear_counter = 0
     
-    def setup_skeleton(self, skin_data):
-        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin"""
+    def setup_skeleton(self, skin_data, animations=None):
+        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin
+        Opcionalmente utiliza dados das animações para calcular as poses de
+        bind de forma mais precisa."""
         if not skin_data or 'bones' not in skin_data:
             print("❌ Dados de skin inválidos")
             return False
@@ -786,7 +788,7 @@ class AnimationSystem:
         self.final_bone_matrices = [np.eye(4) for _ in range(total_bones)]
         
         # ✅ CALCULAR BIND POSES CORRETAS
-        self._calculate_correct_bind_poses(skin_data)
+        self._calculate_correct_bind_poses(skin_data, animations)
         
         print(f"✅ Sistema de animação configurado!")
         print(f"   Hierarquia: {len(self.bone_hierarchy)} pais")
@@ -841,15 +843,26 @@ class AnimationSystem:
         
         print(f"✅ Mapeamento concluído: {len(self.vertex_bone_mapping)} vértices mapeados")
     
-    def _calculate_correct_bind_poses(self, skin_data):
-        """✅ BIND POSES CORRETAS: Para hard e soft bones"""
-        # Para hard bones, usar posições baseadas em hierarquia
+    def _calculate_correct_bind_poses(self, skin_data, animations=None):
+        """✅ BIND POSES CORRETAS: Para hard e soft bones
+        Se animações forem fornecidas, utiliza o transOffset do primeiro
+        animation para posicionar corretamente cada bone."""
+
+        first_anim = animations[0] if animations else None
+
+        # Para hard bones, usar posições vindas da animação se disponível
         for i, bone in enumerate(self.bones):
             bind_matrix = np.eye(4)
-            
-            # Posição inicial baseada no índice do bone
-            bind_matrix[1, 3] = i * 0.1  # Offset vertical
-            
+
+            if first_anim and i < len(first_anim.get('bones', [])):
+                offset = first_anim['bones'][i].get('transOffset', (0, 0, 0))
+                bind_matrix[0, 3] = offset[0]
+                bind_matrix[1, 3] = offset[1]
+                bind_matrix[2, 3] = offset[2]
+            else:
+                # Fallback anterior: pequeno deslocamento vertical
+                bind_matrix[1, 3] = i * 0.1
+
             self.bind_pose_matrices[i] = bind_matrix
         
         # ✅ PARA SOFT BONES, USAR MATRIZES DO ARQUIVO (estrutura correta)
@@ -1306,7 +1319,7 @@ class KEXCore:
         
         # 4. Configurar sistema de animação
         if self.current_skin:
-            success = self.anim_system.setup_skeleton(self.current_skin)
+            success = self.anim_system.setup_skeleton(self.current_skin, self.current_animations)
             if success:
                 print("✅ Sistema completo configurado")
             else:

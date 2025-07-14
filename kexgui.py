@@ -229,8 +229,9 @@ class ModelViewer(QOpenGLWidget):
         if max_frames <= 0:
             return
         
-        # Incrementar frame
-        self.current_frame += self.animation_speed / 10.0
+        # Incrementar frame considerando o intervalo do timer
+        delta = self.timer.interval() / 1000.0  # segundos
+        self.current_frame += self.animation_speed * delta * 30.0
         if self.current_frame >= max_frames:
             self.current_frame = 0.0
         
@@ -341,7 +342,8 @@ class ModelViewer(QOpenGLWidget):
         if play:
             anim = self.animations[self.current_animation]
             print(f"▶️ Iniciando animação '{anim['name']}'")
-            self.timer.start(50)  # 20 FPS
+            # Intervalo menor para animações mais suaves (~60 FPS)
+            self.timer.start(16)
         else:
             print("⏹️ Parando animação")
             self.timer.stop()
