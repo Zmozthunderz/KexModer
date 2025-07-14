@@ -1378,36 +1378,30 @@ class KEXCore:
         indices = self.current_skin.get('indices', [])
         skin_verts = self.current_skin.get('verts', [])
 
-        reorder_needed = False
-
-        if len(indices) != len(locs):
-            print("⚠️ Índices do SKN não correspondem ao número de vértices")
-        elif indices != list(range(len(locs))):
-            reorder_needed = True
-
+        # Aplicar vértices do SKN se o tamanho for compatível
         if len(skin_verts) == len(locs):
-            source = skin_verts
-        else:
-            source = locs
-
-        if reorder_needed:
             try:
-                reordered = [source[i] for i in indices]
-                self.current_mesh['verts']['loc'] = reordered
-
-                normals = self.current_mesh['verts'].get('normals', [])
-                if len(normals) == len(source):
-                    self.current_mesh['verts']['normals'] = [normals[i] for i in indices]
-
-                print("🔧 Vértices reordenados conforme índices do SKN")
-            except Exception as e:
-                print(f"⚠️ Erro ao reordenar vértices: {e}")
-        elif source is skin_verts:
-            try:
-                self.current_mesh['verts']['loc'] = source.copy()
+                self.current_mesh['verts']['loc'] = skin_verts.copy()
                 print("🔧 Vértices substituídos pelos do SKN")
             except Exception as e:
                 print(f"⚠️ Não foi possível aplicar vértices do SKN: {e}")
+
+        # Reordenar vértices somente se os índices indicarem claramente uma
+        # correspondência 1:1 com a mesh. No formato original, a lista de
+        # índices pode conter entradas duplicadas, então verificamos antes.
+        if len(indices) == len(locs) and len(set(indices)) == len(locs):
+            if indices != list(range(len(locs))):
+                try:
+                    reordered = [self.current_mesh['verts']['loc'][i] for i in indices]
+                    self.current_mesh['verts']['loc'] = reordered
+
+                    normals = self.current_mesh['verts'].get('normals', [])
+                    if len(normals) == len(indices):
+                        self.current_mesh['verts']['normals'] = [normals[i] for i in indices]
+
+                    print("🔧 Vértices reordenados conforme índices do SKN")
+                except Exception as e:
+                    print(f"⚠️ Erro ao reordenar vértices: {e}")
     
     def get_system_status(self):
         """Status completo do sistema"""
