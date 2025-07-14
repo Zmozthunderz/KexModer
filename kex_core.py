@@ -510,8 +510,22 @@ class SkinInterpreter(Model3DInterpreter):
                 'matrix': soft['matrix']
             }
             converted['softBones'].append(converted_soft)
-        
+
         return converted
+
+    def get_debug_info(self):
+        """Informações de debug do skin carregado"""
+        if not self.skin_data:
+            return "Nenhum skin carregado"
+
+        info = []
+        info.append("🦴 SKIN INTERPRETER DEBUG:")
+        info.append(f"Bones: {self.skin_data.get('bone_count', 0)}")
+        info.append(f"Soft bones: {self.skin_data.get('soft_bone_count', 0)}")
+        info.append(f"Vértices: {self.skin_data.get('vert_count', 0)}")
+        info.append(f"Índices: {self.skin_data.get('indice_count', 0)}")
+
+        return "\n".join(info)
     
     # Métodos de leitura baseados no skn_v2.py
     def read_string(self, data: bytes, offset: int, length: int) -> Tuple[str, int]:
