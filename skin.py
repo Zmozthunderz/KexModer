@@ -135,7 +135,9 @@ def load_msh(filepath: str) -> Dict:
         normals.append(normal)
 
     loop_normals = []
-    if offset >= len(data):
+    remaining = len(data) - offset
+    expected_bytes = loop_count * 12
+    if remaining < expected_bytes:
         for face in faces:
             for idx in face['indices']:
                 loop_normals.append(normals[idx])
