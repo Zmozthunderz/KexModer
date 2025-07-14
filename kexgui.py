@@ -47,7 +47,7 @@ try:
         QSplitter, QTabWidget
     )
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, QElapsedTimer
     from PySide6.QtGui import QFont, QPalette, QColor, QAction
 except ImportError as e:
     print(f"❌ PySide6 não encontrado: {e}")
@@ -113,6 +113,7 @@ class ModelViewer(QOpenGLWidget):
         # ✅ TIMER DE ANIMAÇÃO
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_animation)
+        self.elapsed = QElapsedTimer()
         
         # Mouse
         self.last_mouse_pos = None
@@ -229,8 +230,9 @@ class ModelViewer(QOpenGLWidget):
         if max_frames <= 0:
             return
         
-        # Incrementar frame considerando o intervalo do timer
-        delta = self.timer.interval() / 1000.0  # segundos
+        # Incrementar frame usando tempo real decorrido
+        delta = self.elapsed.elapsed() / 1000.0
+        self.elapsed.restart()
         self.current_frame += self.animation_speed * delta * 30.0
         if self.current_frame >= max_frames:
             self.current_frame = 0.0
@@ -342,6 +344,7 @@ class ModelViewer(QOpenGLWidget):
         if play:
             anim = self.animations[self.current_animation]
             print(f"▶️ Iniciando animação '{anim['name']}'")
+            self.elapsed.start()
             # Intervalo menor para animações mais suaves (~60 FPS)
             self.timer.start(16)
         else:
