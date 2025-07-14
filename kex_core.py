@@ -761,8 +761,11 @@ class AnimationSystem:
         self._interpolation_cache = {}
         self._cache_clear_counter = 0
     
-    def setup_skeleton(self, skin_data):
-        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin."""
+    def setup_skeleton(self, skin_data, animations=None):
+        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin.
+
+        Opcionalmente, pode receber as animações já carregadas para utilizar
+        seus offsets na construção do bind pose."""
         if not skin_data or 'bones' not in skin_data:
             print("❌ Dados de skin inválidos")
             return False
@@ -794,7 +797,7 @@ class AnimationSystem:
         self.final_bone_matrices = [np.eye(4) for _ in range(total_bones)]
         
         # ✅ CALCULAR BIND POSES CORRETAS
-        self._calculate_correct_bind_poses(skin_data)
+        self._calculate_correct_bind_poses(skin_data, animations)
         
         print(f"✅ Sistema de animação configurado!")
         print(f"   Hierarquia: {len(self.bone_hierarchy)} pais")
@@ -856,15 +859,31 @@ class AnimationSystem:
         
         print(f"✅ Mapeamento concluído: {len(self.vertex_bone_mapping)} vértices mapeados")
     
-    def _calculate_correct_bind_poses(self, skin_data):
-        """✅ BIND POSES CORRETAS: Para hard e soft bones"""
+    def _calculate_correct_bind_poses(self, skin_data, animations=None):
+        """✅ BIND POSES CORRETAS: Para hard e soft bones.
 
-        # Para hard bones, usar pequeno deslocamento vertical somente para
-        # visualizar a hierarquia quando não há dados explícitos de bind pose.
+        Usa offsets de animação se disponíveis para posicionar os hard bones.
+        """
+
+        # Obter offsets dos hard bones a partir da primeira animação
+        anim_offsets = []
+        if animations:
+            for anim in animations:
+                if 'bones' in anim and len(anim['bones']) >= len(self.bones):
+                    anim_offsets = [b.get('transOffset', (0, 0, 0)) for b in anim['bones']]
+                    break
+
         for i, bone in enumerate(self.bones):
             bind_matrix = np.eye(4)
 
-            bind_matrix[1, 3] = i * 0.1
+            if i < len(anim_offsets):
+                off = anim_offsets[i]
+                bind_matrix[0, 3] = off[0]
+                bind_matrix[1, 3] = off[1]
+                bind_matrix[2, 3] = off[2]
+            else:
+                # Fallback: usar pequeno deslocamento vertical para visualizar
+                bind_matrix[1, 3] = i * 0.1
 
             self.bind_pose_matrices[i] = bind_matrix
         
@@ -1320,7 +1339,10 @@ class KEXCore:
         
         # 4. Configurar sistema de animação
         if self.current_skin:
-            success = self.anim_system.setup_skeleton(self.current_skin)
+            success = self.anim_system.setup_skeleton(
+                self.current_skin,
+                self.current_animations if isinstance(self.current_animations, list) else None,
+            )
             if success:
                 print("✅ Sistema completo configurado")
             else:
@@ -1342,17 +1364,36 @@ class KEXCore:
         indices = self.current_skin.get('indices', [])
         skin_verts = self.current_skin.get('verts', [])
 
-        if len(skin_verts) == len(locs):
-            try:
-                self.current_mesh['verts']['loc'] = skin_verts.copy()
-                print("🔧 Vértices substituídos pelos do SKN")
-            except Exception as e:
-                print(f"⚠️ Não foi possível aplicar vértices do SKN: {e}")
+        reorder_needed = False
 
         if len(indices) != len(locs):
             print("⚠️ Índices do SKN não correspondem ao número de vértices")
-        elif sorted(indices) != list(range(len(locs))):
-            print("⚠️ Índices do SKN possuem ordem inesperada")
+        elif indices != list(range(len(locs))):
+            reorder_needed = True
+
+        if len(skin_verts) == len(locs):
+            source = skin_verts
+        else:
+            source = locs
+
+        if reorder_needed:
+            try:
+                reordered = [source[i] for i in indices]
+                self.current_mesh['verts']['loc'] = reordered
+
+                normals = self.current_mesh['verts'].get('normals', [])
+                if len(normals) == len(source):
+                    self.current_mesh['verts']['normals'] = [normals[i] for i in indices]
+
+                print("🔧 Vértices reordenados conforme índices do SKN")
+            except Exception as e:
+                print(f"⚠️ Erro ao reordenar vértices: {e}")
+        elif source is skin_verts:
+            try:
+                self.current_mesh['verts']['loc'] = source.copy()
+                print("🔧 Vértices substituídos pelos do SKN")
+            except Exception as e:
+                print(f"⚠️ Não foi possível aplicar vértices do SKN: {e}")
     
     def get_system_status(self):
         """Status completo do sistema"""
