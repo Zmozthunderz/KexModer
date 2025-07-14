@@ -36,6 +36,14 @@ import math
 import json
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
+from collections import defaultdict
+
+try:
+    from OpenGL.GL import *
+    from OpenGL.GLU import *
+except ImportError:
+    print("❌ PyOpenGL não está instalado. Execute: pip install PyOpenGL PyOpenGL_accelerate")
+    sys.exit(1)
 
 # Verificar se PySide6 está instalado
 try:
@@ -44,13 +52,167 @@ try:
         QPushButton, QTextEdit, QFileDialog, QLabel,
         QGroupBox, QComboBox, QCheckBox
     )
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QFont, QPalette, QColor, QAction
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
 except ImportError as e:
     print("❌ Erro: PySide6 não está instalado ou há problema na instalação.")
     print("Por favor, execute: pip install PySide6")
     print(f"Erro específico: {e}")
     sys.exit(1)
+
+try:
+    from PIL import Image
+except ImportError:
+    print("❌ Pillow não está instalado. Execute: pip install Pillow")
+    sys.exit(1)
+
+# -----------------------------------------------------------------------------
+# Basic binary reading helpers para arquivos .msh
+
+def read_bytes(data: bytes, offset: int, count: int) -> Tuple[bytes, int]:
+    return data[offset:offset + count], offset + count
+
+def read_str(data: bytes, offset: int, count: int) -> Tuple[str, int]:
+    b, offset = read_bytes(data, offset, count)
+    return b.decode("ascii", errors="ignore"), offset
+
+def read_u32(data: bytes, offset: int) -> Tuple[int, int]:
+    val = struct.unpack("<I", data[offset:offset + 4])[0]
+    return val, offset + 4
+
+def read_u16(data: bytes, offset: int) -> Tuple[int, int]:
+    val = struct.unpack("<H", data[offset:offset + 2])[0]
+    return val, offset + 2
+
+def read_u8(data: bytes, offset: int) -> Tuple[int, int]:
+    val = data[offset]
+    return val, offset + 1
+
+def read_float(data: bytes, offset: int) -> Tuple[float, int]:
+    val = struct.unpack("<f", data[offset:offset + 4])[0]
+    if math.isnan(val):
+        val = 0.0
+    return val, offset + 4
+
+def read_vec3(data: bytes, offset: int) -> Tuple[Tuple[float, float, float], int]:
+    x, offset = read_float(data, offset)
+    y, offset = read_float(data, offset)
+    z, offset = read_float(data, offset)
+    return (x, y, z), offset
+
+# -----------------------------------------------------------------------------
+
+# Carregamento simples de arquivos .msh baseado em shadowman_mesh.load
+
+def load_msh(filepath: str) -> Dict:
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    offset = 0
+    s_file, offset = read_str(data, offset, 4)
+    if s_file != "EMsh":
+        raise ValueError("Not a valid .msh file")
+
+    s_ver, offset = read_str(data, offset, 4)
+    if s_ver != "V001":
+        raise ValueError("Unsupported msh version")
+
+    face_count, offset = read_u32(data, offset)
+    vert_count, offset = read_u32(data, offset)
+
+    faces = []
+    loop_count = 0
+    for _ in range(face_count):
+        num_verts, offset = read_u8(data, offset)
+        _fill, offset = read_u8(data, offset)
+        _u1, offset = read_u8(data, offset)
+        _u2, offset = read_u8(data, offset)
+        tex_index, offset = read_u16(data, offset)
+        _u3, offset = read_u16(data, offset)
+        _attr, offset = read_u16(data, offset)
+        for _ in range(4):
+            v, offset = read_float(data, offset)
+        indices = []
+        uvs = []
+        colors = []
+        for _ in range(num_verts):
+            vi, offset = read_u16(data, offset)
+            u, offset = read_float(data, offset)
+            v, offset = read_float(data, offset)
+            r, offset = read_u8(data, offset)
+            g, offset = read_u8(data, offset)
+            b, offset = read_u8(data, offset)
+            a, offset = read_u8(data, offset)
+            indices.append(vi)
+            uvs.append((u, -v))
+            colors.append((r, g, b, a))
+            loop_count += 1
+        faces.append({
+            "numVerts": num_verts,
+            "texIndex": tex_index,
+            "indices": indices,
+            "uvs": uvs,
+            "colors": colors,
+        })
+
+    verts = []
+    normals = []
+    for _ in range(vert_count):
+        loc, offset = read_vec3(data, offset)
+        nx, offset = read_float(data, offset)
+        ny, offset = read_float(data, offset)
+        nz, offset = read_float(data, offset)
+        verts.append((-loc[0], loc[1], loc[2]))
+        normals.append((nx, -ny, -nz))
+
+    loop_normals = []
+    if offset >= len(data):
+        for face in faces:
+            for idx in face["indices"]:
+                loop_normals.append(normals[idx])
+    else:
+        for _ in range(loop_count):
+            nx, offset = read_float(data, offset)
+            ny, offset = read_float(data, offset)
+            nz, offset = read_float(data, offset)
+            loop_normals.append((nx, -ny, -nz))
+
+    return {
+        "faces": faces,
+        "verts": verts,
+        "normals": normals,
+        "loop_normals": loop_normals,
+    }
+
+# -----------------------------------------------------------------------------
+# Carregamento de texturas por índice
+
+VALID_TEXTURE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".bmp", ".tga"]
+
+def load_textures(directory: str) -> Dict[int, int]:
+    textures = {}
+    for filename in os.listdir(directory):
+        base, ext = os.path.splitext(filename)
+        if ext.lower() not in VALID_TEXTURE_EXTENSIONS:
+            continue
+        try:
+            index = int(base.split("_")[0]) if "_" in base else int(base)
+        except ValueError:
+            continue
+        path = os.path.join(directory, filename)
+        img = Image.open(path).transpose(Image.FLIP_TOP_BOTTOM)
+        img_data = img.convert("RGBA").tobytes()
+        width, height = img.size
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img_data)
+        textures[index] = tex_id
+    return textures
+
+# -----------------------------------------------------------------------------
 
 class ANIMSParser:
     """Classe para parsing de arquivos ANIMS."""
@@ -377,6 +539,96 @@ class SKNParser:
         except Exception as e:
             return False, f"Erro ao carregar arquivo: {str(e)}"
 
+
+class GLViewer(QOpenGLWidget):
+    """Widget OpenGL para visualizar modelos .msh."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.model = None
+        self.textures = {}
+        self.center = (0.0, 0.0, 0.0)
+        self.scale = 1.0
+        self.angle = 0.0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_angle)
+        self.timer.start(16)
+
+    # ------------------------------------------------------------------
+    def _update_angle(self):
+        self.angle = (self.angle + 0.5) % 360
+        self.update()
+
+    def load_model(self, path: str):
+        self.model = load_msh(path)
+        self.textures = load_textures(os.path.dirname(path))
+        self.center, self.scale = self._compute_bounds()
+        self.update()
+
+    def _compute_bounds(self):
+        verts = self.model['verts'] if self.model else []
+        if not verts:
+            return (0.0, 0.0, 0.0), 1.0
+        xs = [v[0] for v in verts]
+        ys = [v[1] for v in verts]
+        zs = [v[2] for v in verts]
+        min_v = (min(xs), min(ys), min(zs))
+        max_v = (max(xs), max(ys), max(zs))
+        center = (
+            (min_v[0] + max_v[0]) / 2.0,
+            (min_v[1] + max_v[1]) / 2.0,
+            (min_v[2] + max_v[2]) / 2.0,
+        )
+        size = max(max_v[0] - min_v[0], max_v[1] - min_v[1], max_v[2] - min_v[2])
+        scale = 2.0 / size if size != 0 else 1.0
+        return center, scale
+
+    # ------------------------------------------------------------------
+    def initializeGL(self):
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_TEXTURE_2D)
+        glClearColor(0.1, 0.1, 0.1, 1.0)
+
+    def _group_faces_by_texture(self):
+        groups = defaultdict(list)
+        if not self.model:
+            return groups
+        for face in self.model['faces']:
+            groups[face['texIndex']].append(face)
+        return groups
+
+    def _draw_model(self):
+        if not self.model:
+            return
+        verts = self.model['verts']
+        for tex_index, faces in self._group_faces_by_texture().items():
+            tex_id = self.textures.get(tex_index)
+            glBindTexture(GL_TEXTURE_2D, tex_id or 0)
+            glBegin(GL_TRIANGLES)
+            for face in faces:
+                for vi, uv in zip(face['indices'], face['uvs']):
+                    glTexCoord2f(uv[0], uv[1])
+                    x, y, z = verts[vi]
+                    x = (x - self.center[0]) * self.scale
+                    y = (y - self.center[1]) * self.scale
+                    z = (z - self.center[2]) * self.scale
+                    glVertex3f(x, y, z)
+            glEnd()
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+        glTranslatef(0.0, 0.0, -3.0)
+        glRotatef(self.angle, 0.0, 1.0, 0.0)
+        self._draw_model()
+
+    def resizeGL(self, w: int, h: int):
+        glViewport(0, 0, w, h)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(45.0, float(w) / float(h or 1), 0.1, 100.0)
+        glMatrixMode(GL_MODELVIEW)
+
 class SKNVisualizerWidget(QWidget):
     """Widget principal do visualizador SKN."""
     
@@ -386,6 +638,7 @@ class SKNVisualizerWidget(QWidget):
         self.anims_parser = ANIMSParser()
         self.current_file = None
         self.current_anims_file = None
+        self.current_mesh_file = None
         self.setup_ui()
         
     def setup_ui(self):
@@ -406,6 +659,12 @@ class SKNVisualizerWidget(QWidget):
         self.load_anims_button.clicked.connect(self.load_anims_file)
         self.load_anims_button.setMinimumHeight(40)
         header_layout.addWidget(self.load_anims_button)
+
+        # Botão para carregar mesh
+        self.load_mesh_button = QPushButton("📦 Carregar Mesh")
+        self.load_mesh_button.clicked.connect(self.load_mesh_file)
+        self.load_mesh_button.setMinimumHeight(40)
+        header_layout.addWidget(self.load_mesh_button)
         
         # Botão para exportar JSON
         self.export_button = QPushButton("💾 Exportar JSON")
@@ -423,9 +682,19 @@ class SKNVisualizerWidget(QWidget):
         self.anims_label = QLabel("Nenhuma animação carregada")
         self.anims_label.setStyleSheet("color: #666; font-style: italic;")
         header_layout.addWidget(self.anims_label)
-        
+
+        # Label do mesh
+        self.mesh_label = QLabel("Nenhum mesh carregado")
+        self.mesh_label.setStyleSheet("color: #666; font-style: italic;")
+        header_layout.addWidget(self.mesh_label)
+
         header_layout.addStretch()
         layout.addLayout(header_layout)
+
+        # Visualizador 3D
+        self.viewer = GLViewer(self)
+        self.viewer.setMinimumHeight(300)
+        layout.addWidget(self.viewer)
         
         # Controles de visualização
         controls_group = QGroupBox("Opções de Visualização")
@@ -790,6 +1059,29 @@ class SKNVisualizerWidget(QWidget):
                 self.print_to_console(f"\n❌ {message}", "#F44336")
                 self.anims_label.setStyleSheet("color: #F44336;")
                 self.status_label.setText("Erro ao carregar animações")
+
+    def load_mesh_file(self):
+        """Abre dialog para carregar arquivo MSH e exibi-lo."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar Arquivo MSH",
+            "",
+            "Shadow Man Mesh Files (*.msh);;All Files (*)",
+        )
+
+        if file_path:
+            self.current_mesh_file = file_path
+            self.mesh_label.setText(f"Mesh: {os.path.basename(file_path)}")
+            self.status_label.setText("Carregando mesh...")
+            try:
+                self.viewer.load_model(file_path)
+                self.mesh_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                self.print_to_console(f"\n✅ Mesh carregado: {os.path.basename(file_path)}", "#4CAF50")
+                self.status_label.setText("Mesh carregado com sucesso")
+            except Exception as e:
+                self.print_to_console(f"\n❌ Erro ao carregar mesh: {e}", "#F44336")
+                self.mesh_label.setStyleSheet("color: #F44336;")
+                self.status_label.setText("Erro ao carregar mesh")
     
     def update_export_button_state(self):
         """Atualiza o estado do botão de exportar baseado nos arquivos carregados."""
@@ -1326,6 +1618,11 @@ class MainWindow(QMainWindow):
         open_anims_action.setShortcut("Ctrl+Shift+O")
         open_anims_action.triggered.connect(self.visualizer.load_anims_file)
         file_menu.addAction(open_anims_action)
+
+        open_mesh_action = QAction("Abrir Mesh...", self)
+        open_mesh_action.setShortcut("Ctrl+M")
+        open_mesh_action.triggered.connect(self.visualizer.load_mesh_file)
+        file_menu.addAction(open_mesh_action)
         
         export_action = QAction("Exportar JSON...", self)
         export_action.setShortcut("Ctrl+E")
