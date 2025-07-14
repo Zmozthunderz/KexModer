@@ -650,23 +650,11 @@ class SKNVisualizerWidget(QWidget):
         # Cabeçalho
         header_layout = QHBoxLayout()
         
-        # Botão para carregar arquivo
-        self.load_button = QPushButton("📁 Carregar Arquivo SKN")
-        self.load_button.clicked.connect(self.load_file)
-        self.load_button.setMinimumHeight(40)
-        header_layout.addWidget(self.load_button)
-        
-        # Botão para carregar animações
-        self.load_anims_button = QPushButton("🎬 Carregar Animações")
-        self.load_anims_button.clicked.connect(self.load_anims_file)
-        self.load_anims_button.setMinimumHeight(40)
-        header_layout.addWidget(self.load_anims_button)
-
-        # Botão para carregar mesh
-        self.load_mesh_button = QPushButton("📦 Carregar Mesh")
-        self.load_mesh_button.clicked.connect(self.load_mesh_file)
-        self.load_mesh_button.setMinimumHeight(40)
-        header_layout.addWidget(self.load_mesh_button)
+        # Botão único para carregar modelo (.msh + .skn + .anims)
+        self.load_model_button = QPushButton("📦 Carregar Modelo")
+        self.load_model_button.clicked.connect(self.load_model_bundle)
+        self.load_model_button.setMinimumHeight(40)
+        header_layout.addWidget(self.load_model_button)
         
         # Botão para exportar JSON
         self.export_button = QPushButton("💾 Exportar JSON")
@@ -1062,8 +1050,8 @@ class SKNVisualizerWidget(QWidget):
                 self.anims_label.setStyleSheet("color: #F44336;")
                 self.status_label.setText("Erro ao carregar animações")
 
-    def load_mesh_file(self):
-        """Abre dialog para carregar arquivo MSH e exibi-lo."""
+    def load_model_bundle(self):
+        """Carrega mesh, skin e anims a partir de um arquivo .msh."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Selecionar Arquivo MSH",
@@ -1071,19 +1059,61 @@ class SKNVisualizerWidget(QWidget):
             "Shadow Man Mesh Files (*.msh);;All Files (*)",
         )
 
-        if file_path:
-            self.current_mesh_file = file_path
-            self.mesh_label.setText(f"Mesh: {os.path.basename(file_path)}")
-            self.status_label.setText("Carregando mesh...")
-            try:
-                self.viewer.load_model(file_path)
-                self.mesh_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
-                self.print_to_console(f"\n✅ Mesh carregado: {os.path.basename(file_path)}", "#4CAF50")
-                self.status_label.setText("Mesh carregado com sucesso")
-            except Exception as e:
-                self.print_to_console(f"\n❌ Erro ao carregar mesh: {e}", "#F44336")
-                self.mesh_label.setStyleSheet("color: #F44336;")
-                self.status_label.setText("Erro ao carregar mesh")
+        if not file_path:
+            return
+
+        base, _ = os.path.splitext(file_path)
+        skn_path = base + ".skn"
+        anims_path = base + ".anims"
+
+        self.current_mesh_file = file_path
+        self.mesh_label.setText(f"Mesh: {os.path.basename(file_path)}")
+        self.status_label.setText("Carregando modelo...")
+
+        # Carregar mesh e texturas
+        try:
+            self.viewer.load_model(file_path)
+            self.mesh_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            self.print_to_console(f"\n✅ Mesh carregado: {os.path.basename(file_path)}", "#4CAF50")
+        except Exception as e:
+            self.print_to_console(f"\n❌ Erro ao carregar mesh: {e}", "#F44336")
+            self.mesh_label.setStyleSheet("color: #F44336;")
+
+        # Carregar SKN correspondente
+        if os.path.exists(skn_path):
+            self.current_file = skn_path
+            self.file_label.setText(f"Arquivo: {os.path.basename(skn_path)}")
+            success, msg = self.parser.load_skn_file(skn_path)
+            if success:
+                self.file_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                self.print_to_console(f"✅ {msg}", "#4CAF50")
+            else:
+                self.file_label.setStyleSheet("color: #F44336;")
+                self.print_to_console(f"❌ {msg}", "#F44336")
+        else:
+            self.file_label.setText("SKN não encontrado")
+            self.file_label.setStyleSheet("color: #F44336;")
+            self.print_to_console("❌ Arquivo SKN correspondente não encontrado", "#F44336")
+
+        # Carregar ANIMS correspondente
+        if os.path.exists(anims_path):
+            self.current_anims_file = anims_path
+            self.anims_label.setText(f"Animações: {os.path.basename(anims_path)}")
+            success, msg = self.anims_parser.load_anims_file(anims_path)
+            if success:
+                self.anims_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                self.print_to_console(f"🎬 {msg}", "#4CAF50")
+            else:
+                self.anims_label.setStyleSheet("color: #F44336;")
+                self.print_to_console(f"❌ {msg}", "#F44336")
+        else:
+            self.anims_label.setText("Anims não encontrado")
+            self.anims_label.setStyleSheet("color: #F44336;")
+            self.print_to_console("❌ Arquivo ANIMS correspondente não encontrado", "#F44336")
+
+        self.status_label.setText("Modelo carregado")
+        self.update_export_button_state()
+        self.update_display()
     
     def update_export_button_state(self):
         """Atualiza o estado do botão de exportar baseado nos arquivos carregados."""
@@ -1621,9 +1651,9 @@ class MainWindow(QMainWindow):
         open_anims_action.triggered.connect(self.visualizer.load_anims_file)
         file_menu.addAction(open_anims_action)
 
-        open_mesh_action = QAction("Abrir Mesh...", self)
+        open_mesh_action = QAction("Abrir Modelo...", self)
         open_mesh_action.setShortcut("Ctrl+M")
-        open_mesh_action.triggered.connect(self.visualizer.load_mesh_file)
+        open_mesh_action.triggered.connect(self.visualizer.load_model_bundle)
         file_menu.addAction(open_mesh_action)
         
         export_action = QAction("Exportar JSON...", self)
