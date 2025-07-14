@@ -7,9 +7,22 @@ from typing import Dict, List, Tuple
 try:
     from OpenGL.GL import *
     from OpenGL.GLU import *
-    from OpenGL.GLUT import *
-except ImportError as e:
+except ImportError:
     raise SystemExit("PyOpenGL required: pip install PyOpenGL PyOpenGL_accelerate")
+
+try:
+    from PySide6.QtWidgets import (
+        QApplication,
+        QMainWindow,
+        QFileDialog,
+        QAction,
+    )
+    from PySide6.QtCore import QTimer
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+except ImportError:
+    raise SystemExit(
+        "PySide6 required for the viewer: pip install PySide6"
+    )
 
 try:
     from PIL import Image
@@ -170,92 +183,130 @@ def load_textures(directory: str) -> Dict[int, int]:
 # -----------------------------------------------------------------------------
 # Simple OpenGL viewer
 
-class ModelViewer:
-    def __init__(self, model_path: str):
-        self.model_path = model_path
-        self.model_dir = os.path.dirname(model_path)
-        self.model = load_msh(model_path)
-        self.textures = load_textures(self.model_dir)
-        self.angle = 0.0
-        self.center, self.scale = self.compute_bounds()
+class GLViewer(QOpenGLWidget):
+    """OpenGL widget that displays a .msh model."""
 
-    def compute_bounds(self):
-        verts = self.model['verts']
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.model = None
+        self.textures = {}
+        self.center = (0.0, 0.0, 0.0)
+        self.scale = 1.0
+        self.angle = 0.0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_angle)
+        self.timer.start(16)
+
+    # ------------------------------------------------------------------
+    def _update_angle(self):
+        self.angle = (self.angle + 0.5) % 360
+        self.update()
+
+    def load_model(self, path: str):
+        self.model = load_msh(path)
+        self.textures = load_textures(os.path.dirname(path))
+        self.center, self.scale = self._compute_bounds()
+        self.update()
+
+    def _compute_bounds(self):
+        verts = self.model['verts'] if self.model else []
+        if not verts:
+            return (0.0, 0.0, 0.0), 1.0
         xs = [v[0] for v in verts]
         ys = [v[1] for v in verts]
         zs = [v[2] for v in verts]
         min_v = (min(xs), min(ys), min(zs))
         max_v = (max(xs), max(ys), max(zs))
-        center = ( (min_v[0]+max_v[0])/2.0, (min_v[1]+max_v[1])/2.0, (min_v[2]+max_v[2])/2.0 )
-        size = max(max_v[0]-min_v[0], max_v[1]-min_v[1], max_v[2]-min_v[2])
-        scale = 2.0/size if size!=0 else 1.0
+        center = (
+            (min_v[0] + max_v[0]) / 2.0,
+            (min_v[1] + max_v[1]) / 2.0,
+            (min_v[2] + max_v[2]) / 2.0,
+        )
+        size = max(max_v[0] - min_v[0], max_v[1] - min_v[1], max_v[2] - min_v[2])
+        scale = 2.0 / size if size != 0 else 1.0
         return center, scale
 
-    def init_gl(self):
+    # ------------------------------------------------------------------
+    def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_TEXTURE_2D)
         glClearColor(0.1, 0.1, 0.1, 1.0)
 
-    def draw_model(self):
+    def _group_faces_by_texture(self):
+        groups = defaultdict(list)
+        if not self.model:
+            return groups
+        for face in self.model['faces']:
+            groups[face['texIndex']].append(face)
+        return groups
+
+    def _draw_model(self):
+        if not self.model:
+            return
         verts = self.model['verts']
-        for tex_index, faces in self.group_faces_by_texture().items():
+        for tex_index, faces in self._group_faces_by_texture().items():
             tex_id = self.textures.get(tex_index)
-            if tex_id:
-                glBindTexture(GL_TEXTURE_2D, tex_id)
-            else:
-                glBindTexture(GL_TEXTURE_2D, 0)
+            glBindTexture(GL_TEXTURE_2D, tex_id or 0)
             glBegin(GL_TRIANGLES)
             for face in faces:
                 for vi, uv in zip(face['indices'], face['uvs']):
                     glTexCoord2f(uv[0], uv[1])
-                    x,y,z = verts[vi]
+                    x, y, z = verts[vi]
                     x = (x - self.center[0]) * self.scale
                     y = (y - self.center[1]) * self.scale
                     z = (z - self.center[2]) * self.scale
                     glVertex3f(x, y, z)
             glEnd()
 
-    def group_faces_by_texture(self):
-        groups = defaultdict(list)
-        for face in self.model['faces']:
-            groups[face['texIndex']].append(face)
-        return groups
-
-    def display(self):
+    def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
-        glTranslatef(0, 0, -3)
-        glRotatef(self.angle, 0, 1, 0)
-        self.draw_model()
-        glutSwapBuffers()
+        glTranslatef(0.0, 0.0, -3.0)
+        glRotatef(self.angle, 0.0, 1.0, 0.0)
+        self._draw_model()
 
-    def idle(self):
-        self.angle += 0.1
-        glutPostRedisplay()
-
-    def reshape(self, w, h):
+    def resizeGL(self, w: int, h: int):
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45.0, float(w)/float(h or 1), 0.1, 100.0)
+        gluPerspective(45.0, float(w) / float(h or 1), 0.1, 100.0)
         glMatrixMode(GL_MODELVIEW)
 
-    def run(self):
-        glutInit(sys.argv)
-        glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_DEPTH)
-        glutInitWindowSize(800, 600)
-        glutCreateWindow(b'Shadow Man .msh Viewer')
-        self.init_gl()
-        glutDisplayFunc(self.display)
-        glutIdleFunc(self.idle)
-        glutReshapeFunc(self.reshape)
-        glutMainLoop()
+
+class MainWindow(QMainWindow):
+    """Main application window with a menu to load .msh files."""
+
+    def __init__(self, mesh_path: str | None = None):
+        super().__init__()
+        self.setWindowTitle("Shadow Man .msh Viewer")
+        self.viewer = GLViewer(self)
+        self.setCentralWidget(self.viewer)
+        self._create_actions()
+        if mesh_path:
+            self.viewer.load_model(mesh_path)
+
+    def _create_actions(self):
+        open_act = QAction("Open .msh", self)
+        open_act.triggered.connect(self._open_file)
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction(open_act)
+
+    def _open_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open msh",
+            "",
+            "Mesh Files (*.msh)",
+        )
+        if path:
+            self.viewer.load_model(path)
 
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) < 2:
-        print('Usage: python skin.py <file.msh>')
-        sys.exit(1)
-    viewer = ModelViewer(sys.argv[1])
-    viewer.run()
+    mesh_path = sys.argv[1] if len(sys.argv) > 1 else None
+    app = QApplication(sys.argv)
+    window = MainWindow(mesh_path)
+    window.resize(800, 600)
+    window.show()
+    sys.exit(app.exec())
