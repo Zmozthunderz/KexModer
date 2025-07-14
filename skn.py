@@ -103,13 +103,12 @@ def read_vec3(data: bytes, offset: int) -> Tuple[Tuple[float, float, float], int
 
 # -----------------------------------------------------------------------------
 
-# Carregamento simples de arquivos .msh baseado em shadowman_mesh.load
+# Carregamento flexível de arquivos .msh com diversas estratégias
 
-def load_msh(filepath: str) -> Dict:
-    with open(filepath, "rb") as f:
-        data = f.read()
-
+def _parse_msh(data: bytes, read_cplane: bool, read_colors: bool) -> Dict:
+    """Interpreta o binário de um .msh com opções para lidar com variações."""
     offset = 0
+
     s_file, offset = read_str(data, offset, 4)
     if s_file != "EMsh":
         raise ValueError("Not a valid .msh file")
@@ -131,8 +130,11 @@ def load_msh(filepath: str) -> Dict:
         tex_index, offset = read_u16(data, offset)
         _u3, offset = read_u16(data, offset)
         _attr, offset = read_u16(data, offset)
-        for _ in range(4):
-            v, offset = read_float(data, offset)
+
+        if read_cplane:
+            for _ in range(4):
+                _, offset = read_float(data, offset)
+
         indices = []
         uvs = []
         colors = []
@@ -140,10 +142,13 @@ def load_msh(filepath: str) -> Dict:
             vi, offset = read_u16(data, offset)
             u, offset = read_float(data, offset)
             v, offset = read_float(data, offset)
-            r, offset = read_u8(data, offset)
-            g, offset = read_u8(data, offset)
-            b, offset = read_u8(data, offset)
-            a, offset = read_u8(data, offset)
+            if read_colors:
+                r, offset = read_u8(data, offset)
+                g, offset = read_u8(data, offset)
+                b, offset = read_u8(data, offset)
+                a, offset = read_u8(data, offset)
+            else:
+                r = g = b = a = 255
             indices.append(vi)
             uvs.append((u, -v))
             colors.append((r, g, b, a))
@@ -169,16 +174,16 @@ def load_msh(filepath: str) -> Dict:
     loop_normals = []
     remaining = len(data) - offset
     expected_bytes = loop_count * 12
-    if remaining < expected_bytes:
-        for face in faces:
-            for idx in face["indices"]:
-                loop_normals.append(normals[idx])
-    else:
+    if remaining >= expected_bytes:
         for _ in range(loop_count):
             nx, offset = read_float(data, offset)
             ny, offset = read_float(data, offset)
             nz, offset = read_float(data, offset)
             loop_normals.append((nx, -ny, -nz))
+    else:
+        for face in faces:
+            for idx in face["indices"]:
+                loop_normals.append(normals[idx])
 
     return {
         "faces": faces,
@@ -186,6 +191,31 @@ def load_msh(filepath: str) -> Dict:
         "normals": normals,
         "loop_normals": loop_normals,
     }
+
+
+def load_msh(filepath: str) -> Tuple[Dict, str]:
+    """Tenta carregar um .msh tentando diferentes combinações de leitura.
+
+    Retorna o modelo lido e o nome do método que obteve sucesso.
+    """
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    attempts = [
+        ("padrao", True, True),
+        ("sem_cores", True, False),
+        ("sem_cplane", False, True),
+        ("minimo", False, False),
+    ]
+    last_error: Optional[Exception] = None
+    for name, cplane, colors in attempts:
+        try:
+            model = _parse_msh(data, read_cplane=cplane, read_colors=colors)
+            return model, name
+        except Exception as e:
+            last_error = e
+            continue
+    raise last_error if last_error else RuntimeError("Falha ao carregar MSH")
 
 # -----------------------------------------------------------------------------
 # Carregamento de texturas por índice
@@ -561,11 +591,13 @@ class GLViewer(QOpenGLWidget):
         self.angle = (self.angle + 0.5) % 360
         self.update()
 
-    def load_model(self, path: str):
-        self.model = load_msh(path)
+    def load_model(self, path: str) -> str:
+        """Carrega um modelo e retorna o nome do método utilizado."""
+        self.model, method = load_msh(path)
         self.textures = load_textures(os.path.dirname(path))
         self.center, self.scale = self._compute_bounds()
         self.update()
+        return method
 
     def _compute_bounds(self):
         verts = self.model['verts'] if self.model else []
@@ -1072,9 +1104,12 @@ class SKNVisualizerWidget(QWidget):
 
         # Carregar mesh e texturas
         try:
-            self.viewer.load_model(file_path)
+            method = self.viewer.load_model(file_path)
             self.mesh_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
-            self.print_to_console(f"\n✅ Mesh carregado: {os.path.basename(file_path)}", "#4CAF50")
+            self.print_to_console(
+                f"\n✅ Mesh carregado: {os.path.basename(file_path)} (método: {method})",
+                "#4CAF50",
+            )
         except Exception as e:
             self.print_to_console(f"\n❌ Erro ao carregar mesh: {e}", "#F44336")
             self.mesh_label.setStyleSheet("color: #F44336;")
