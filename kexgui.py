@@ -42,12 +42,12 @@ except ImportError as e:
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QPushButton, QTextEdit, QFileDialog, QLabel, QGroupBox, 
-        QComboBox, QCheckBox, QSlider, QSpinBox, QListWidget, 
-        QSplitter, QTabWidget
+        QPushButton, QTextEdit, QFileDialog, QLabel, QGroupBox,
+        QComboBox, QCheckBox, QSlider, QSpinBox, QListWidget,
+        QSplitter, QTabWidget, QSizePolicy
     )
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, QElapsedTimer
     from PySide6.QtGui import QFont, QPalette, QColor, QAction
 except ImportError as e:
     print(f"❌ PySide6 não encontrado: {e}")
@@ -99,6 +99,10 @@ class ModelViewer(QOpenGLWidget):
         self.show_texcoords = False
         self.show_textures = True
         self.show_bones = False
+        self.show_mesh = True
+
+        # FPS base para animação (Shadow Man usa 24 FPS por padrão)
+        self.animation_fps = 24
         
         # ✅ ANIMAÇÃO MODERNA
         self.current_animation = 0
@@ -113,6 +117,7 @@ class ModelViewer(QOpenGLWidget):
         # ✅ TIMER DE ANIMAÇÃO
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_animation)
+        self.elapsed = QElapsedTimer()
         
         # Mouse
         self.last_mouse_pos = None
@@ -229,8 +234,10 @@ class ModelViewer(QOpenGLWidget):
         if max_frames <= 0:
             return
         
-        # Incrementar frame
-        self.current_frame += self.animation_speed / 10.0
+        # Incrementar frame usando tempo real decorrido
+        delta = self.elapsed.elapsed() / 1000.0
+        self.elapsed.restart()
+        self.current_frame += self.animation_speed * delta * self.animation_fps
         if self.current_frame >= max_frames:
             self.current_frame = 0.0
         
@@ -341,7 +348,9 @@ class ModelViewer(QOpenGLWidget):
         if play:
             anim = self.animations[self.current_animation]
             print(f"▶️ Iniciando animação '{anim['name']}'")
-            self.timer.start(50)  # 20 FPS
+            self.elapsed.start()
+            interval = max(1, int(1000 / self.animation_fps))
+            self.timer.start(interval)
         else:
             print("⏹️ Parando animação")
             self.timer.stop()
@@ -355,6 +364,10 @@ class ModelViewer(QOpenGLWidget):
             self.current_frame = max(0.0, min(float(frame), max_frames - 1))
             self.apply_animation()
             self.update()
+
+    def set_animation_fps(self, fps):
+        """Alterar FPS base da animação"""
+        self.animation_fps = max(1, fps)
     
     def get_debug_info(self):
         """Informações de debug do visualizador"""
@@ -364,6 +377,7 @@ class ModelViewer(QOpenGLWidget):
         info.append(f"Animação: {self.current_animation}")
         info.append(f"Frame: {self.current_frame:.2f}")
         info.append(f"Playing: {self.animation_playing}")
+        info.append(f"FPS: {self.animation_fps}")
         info.append(f"Timer ativo: {self.timer.isActive()}")
         
         if self.model_data:
@@ -427,6 +441,11 @@ class ModelViewer(QOpenGLWidget):
     
     def render_model(self):
         """Renderizar modelo 3D"""
+        if not self.show_mesh:
+            if self.show_bones and self.skin_data and self.system_mode == "COMPLETO":
+                self.render_skeleton()
+            return
+
         # Escolher vértices corretos
         if self.animated_vertices and self.system_mode in ["COMPLETO", "BÁSICO"]:
             vertices = self.animated_vertices
@@ -946,6 +965,7 @@ class MainWindow(QMainWindow):
         # Painel de controles
         controls_widget = QWidget()
         controls_widget.setMaximumWidth(400)
+        controls_widget.setMinimumWidth(300)
         controls_layout = QVBoxLayout(controls_widget)
         
         # Botão de carregamento
@@ -986,10 +1006,15 @@ class MainWindow(QMainWindow):
         self.texcoords_check = QCheckBox("📐 UVs como cores")
         self.texcoords_check.toggled.connect(self.toggle_texcoords)
         view_layout.addWidget(self.texcoords_check)
-        
+
         self.bones_check = QCheckBox("🦴 Mostrar Skeleton")
         self.bones_check.toggled.connect(self.toggle_bones)
         view_layout.addWidget(self.bones_check)
+
+        self.mesh_check = QCheckBox("🕸️ Exibir Mesh")
+        self.mesh_check.setChecked(True)
+        self.mesh_check.toggled.connect(self.toggle_mesh)
+        view_layout.addWidget(self.mesh_check)
         
         controls_layout.addWidget(view_group)
         
@@ -1000,7 +1025,8 @@ class MainWindow(QMainWindow):
         # Lista de animações
         anim_layout.addWidget(QLabel("📽️ Animações:"))
         self.anim_list = QListWidget()
-        self.anim_list.setMaximumHeight(120)
+        self.anim_list.setMinimumHeight(150)
+        self.anim_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.anim_list.currentRowChanged.connect(self.select_animation)
         anim_layout.addWidget(self.anim_list)
         
@@ -1009,8 +1035,10 @@ class MainWindow(QMainWindow):
         self.play_button = QPushButton("▶️ Play")
         self.play_button.setStyleSheet("background-color: #4CAF50; color: white;")
         self.play_button.clicked.connect(self.start_animation)
+        self.play_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.stop_button = QPushButton("⏹️ Stop")
         self.stop_button.setStyleSheet("background-color: #f44336; color: white;")
+        self.stop_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.stop_button.clicked.connect(self.stop_animation)
         play_layout.addWidget(self.play_button)
         play_layout.addWidget(self.stop_button)
@@ -1034,6 +1062,14 @@ class MainWindow(QMainWindow):
         self.speed_slider.setValue(10)
         self.speed_slider.valueChanged.connect(self.set_speed)
         anim_layout.addWidget(self.speed_slider)
+
+        # FPS base
+        anim_layout.addWidget(QLabel("🎚️ FPS:"))
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 120)
+        self.fps_spin.setValue(24)
+        self.fps_spin.valueChanged.connect(self.set_fps)
+        anim_layout.addWidget(self.fps_spin)
         
         controls_layout.addWidget(anim_group)
         
@@ -1224,6 +1260,10 @@ class MainWindow(QMainWindow):
     def toggle_bones(self, checked):
         self.viewer.show_bones = checked
         self.viewer.update()
+
+    def toggle_mesh(self, checked):
+        self.viewer.show_mesh = checked
+        self.viewer.update()
     
     def select_animation(self, index):
         if index >= 0:
@@ -1250,6 +1290,9 @@ class MainWindow(QMainWindow):
     
     def set_speed(self, speed):
         self.viewer.animation_speed = speed / 10.0
+
+    def set_fps(self, fps):
+        self.viewer.set_animation_fps(fps)
 
 
 def setup_dark_theme(app):

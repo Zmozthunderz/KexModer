@@ -47,6 +47,15 @@ class Model3DInterpreter:
         # Como não temos global_matrix aqui, aplicamos a transformação direta:
         # Inverter X, manter Y e Z
         return (-vector[0], vector[1], vector[2])
+
+    def apply_global_transform_normal(self, vector):
+        """Transformação dedicada para normais.
+
+        O addon original do Blender aplica a matriz global seguida de
+        ``(x, -y, -z)``. Como aqui não usamos ``global_matrix`` diretamente,
+        espelhamos nos eixos Y e Z para manter a orientação correta.
+        """
+        return (vector[0], -vector[1], -vector[2])
     
     def extract_texture_index(self, filename):
         """Extrai índice de textura do nome do arquivo"""
@@ -247,7 +256,7 @@ class MeshInterpreter(Model3DInterpreter):
                     for j in range(face["numVerts"]):
                         vert_index = self.read_u16(file, False)
                         u = self.read_float(file)
-                        v = -self.read_float(file)  # ✅ Inverter V conforme Blender
+                        v = self.read_float(file)  # V sem inversão
                         color = self.read_shadowman_color(file)
                         
                         face["indices"].append(vert_index)
@@ -261,8 +270,7 @@ class MeshInterpreter(Model3DInterpreter):
                     
                     # ✅ CORREÇÃO: Aplicar transformação correta
                     loc = self.apply_global_transform(loc)
-                    normal = self.apply_global_transform(normal)
-                    normal = (normal[0], -normal[1], -normal[2])  # Corrigir normais
+                    normal = self.apply_global_transform_normal(normal)
                     
                     model["verts"]["loc"].append(loc)
                     model["verts"]["normals"].append(normal)
@@ -502,8 +510,22 @@ class SkinInterpreter(Model3DInterpreter):
                 'matrix': soft['matrix']
             }
             converted['softBones'].append(converted_soft)
-        
+
         return converted
+
+    def get_debug_info(self):
+        """Informações de debug do skin carregado"""
+        if not self.skin_data:
+            return "Nenhum skin carregado"
+
+        info = []
+        info.append("🦴 SKIN INTERPRETER DEBUG:")
+        info.append(f"Bones: {self.skin_data.get('bone_count', 0)}")
+        info.append(f"Soft bones: {self.skin_data.get('soft_bone_count', 0)}")
+        info.append(f"Vértices: {self.skin_data.get('vert_count', 0)}")
+        info.append(f"Índices: {self.skin_data.get('indice_count', 0)}")
+
+        return "\n".join(info)
     
     # Métodos de leitura baseados no skn_v2.py
     def read_string(self, data: bytes, offset: int, length: int) -> Tuple[str, int]:
@@ -701,7 +723,7 @@ class AnimationInterpreter(Model3DInterpreter):
                         
                         # Frame 0 se não existir
                         if 0 not in anim_bone["rots"]:
-                            anim_bone["rots"][0] = (-1, 0, 0, 0)  # identidade left-handed
+                            anim_bone["rots"][0] = (1, 0, 0, 0)  # identidade left-handed
                 
                 print(f"✅ Animações carregadas com sucesso!")
                 self.last_loaded_animations = anims
@@ -741,20 +763,25 @@ class AnimationSystem:
         self.bones = []
         self.soft_bones = []
         self.bone_hierarchy = {}
-        self.vertex_bone_mapping = {}  # vértice -> bone index
-        self.vertex_weights = {}       # vértice -> weight (para soft bones)
+        self.vertex_bone_mapping = {}  # vértice -> [bone indices]
+        self.vertex_weights = {}       # vértice -> [weights]
         
         # Matrizes de transformação
         self.bind_pose_matrices = []
         self.current_pose_matrices = []
         self.final_bone_matrices = []
+        self.global_bind_pose_matrices = []
+        self.inverse_bind_pose_matrices = []
         
         # Cache para performance
         self._interpolation_cache = {}
         self._cache_clear_counter = 0
     
-    def setup_skeleton(self, skin_data):
-        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin"""
+    def setup_skeleton(self, skin_data, animations=None):
+        """✅ CONFIGURAÇÃO CORRETA: Baseada na estrutura real do skin.
+
+        Opcionalmente, pode receber as animações já carregadas para utilizar
+        seus offsets na construção do bind pose."""
         if not skin_data or 'bones' not in skin_data:
             print("❌ Dados de skin inválidos")
             return False
@@ -784,9 +811,10 @@ class AnimationSystem:
         self.bind_pose_matrices = [np.eye(4) for _ in range(total_bones)]
         self.current_pose_matrices = [np.eye(4) for _ in range(total_bones)]
         self.final_bone_matrices = [np.eye(4) for _ in range(total_bones)]
-        
+
         # ✅ CALCULAR BIND POSES CORRETAS
-        self._calculate_correct_bind_poses(skin_data)
+        self._calculate_correct_bind_poses(skin_data, animations)
+        self._compute_bind_pose_hierarchy()
         
         print(f"✅ Sistema de animação configurado!")
         print(f"   Hierarquia: {len(self.bone_hierarchy)} pais")
@@ -813,8 +841,8 @@ class AnimationSystem:
             for i in range(hard_count):
                 if hard_start + i < len(indices):
                     vertex_idx = indices[hard_start + i]
-                    self.vertex_bone_mapping[vertex_idx] = bone_idx
-                    self.vertex_weights[vertex_idx] = 1.0
+                    self.vertex_bone_mapping.setdefault(vertex_idx, []).append(bone_idx)
+                    self.vertex_weights.setdefault(vertex_idx, []).append(1.0)
         
         # ✅ MAPEAR SOFT BONES (seguindo a estrutura real)
         for bone_idx, bone in enumerate(self.bones):
@@ -836,20 +864,44 @@ class AnimationSystem:
                             vertex_idx = indices[soft_vert_start + j]
                             # Soft bones têm prioridade sobre hard bones
                             soft_bone_idx = len(self.bones) + soft_idx
-                            self.vertex_bone_mapping[vertex_idx] = soft_bone_idx
-                            self.vertex_weights[vertex_idx] = soft_bone.get('weight', 1.0)
+                            self.vertex_bone_mapping.setdefault(vertex_idx, []).append(soft_bone_idx)
+                            w = soft_bone.get('weight', 1.0)
+                            self.vertex_weights.setdefault(vertex_idx, []).append(w)
+
+        # Normalizar pesos por vértice
+        for v_idx, weights in self.vertex_weights.items():
+            total_weight = sum(weights)
+            if total_weight > 0:
+                self.vertex_weights[v_idx] = [w / total_weight for w in weights]
         
         print(f"✅ Mapeamento concluído: {len(self.vertex_bone_mapping)} vértices mapeados")
     
-    def _calculate_correct_bind_poses(self, skin_data):
-        """✅ BIND POSES CORRETAS: Para hard e soft bones"""
-        # Para hard bones, usar posições baseadas em hierarquia
+    def _calculate_correct_bind_poses(self, skin_data, animations=None):
+        """✅ BIND POSES CORRETAS: Para hard e soft bones.
+
+        Usa offsets de animação se disponíveis para posicionar os hard bones.
+        """
+
+        # Obter offsets dos hard bones a partir da primeira animação
+        anim_offsets = []
+        if animations:
+            for anim in animations:
+                if 'bones' in anim and len(anim['bones']) >= len(self.bones):
+                    anim_offsets = [b.get('transOffset', (0, 0, 0)) for b in anim['bones']]
+                    break
+
         for i, bone in enumerate(self.bones):
             bind_matrix = np.eye(4)
-            
-            # Posição inicial baseada no índice do bone
-            bind_matrix[1, 3] = i * 0.1  # Offset vertical
-            
+
+            if i < len(anim_offsets):
+                off = anim_offsets[i]
+                bind_matrix[0, 3] = off[0]
+                bind_matrix[1, 3] = off[1]
+                bind_matrix[2, 3] = off[2]
+            else:
+                # Fallback: usar pequeno deslocamento vertical para visualizar
+                bind_matrix[1, 3] = i * 0.1
+
             self.bind_pose_matrices[i] = bind_matrix
         
         # ✅ PARA SOFT BONES, USAR MATRIZES DO ARQUIVO (estrutura correta)
@@ -886,6 +938,38 @@ class AnimationSystem:
                     self.bind_pose_matrices[soft_idx] = np.eye(4)
             else:
                 self.bind_pose_matrices[soft_idx] = np.eye(4)
+
+    def _compute_bind_pose_hierarchy(self):
+        """Calcular matrizes globais e inversas de bind pose."""
+        count = len(self.bind_pose_matrices)
+        self.global_bind_pose_matrices = [np.eye(4) for _ in range(count)]
+        self.inverse_bind_pose_matrices = [np.eye(4) for _ in range(count)]
+
+        for i in range(len(self.bones)):
+            parent = self.bones[i].get('parent', -1)
+            local = self.bind_pose_matrices[i]
+            if parent >= 0 and parent < count:
+                self.global_bind_pose_matrices[i] = np.dot(
+                    self.global_bind_pose_matrices[parent], local
+                )
+            else:
+                self.global_bind_pose_matrices[i] = local.copy()
+
+        for i in range(len(self.bones)):
+            try:
+                self.inverse_bind_pose_matrices[i] = np.linalg.inv(
+                    self.global_bind_pose_matrices[i]
+                )
+            except Exception:
+                self.inverse_bind_pose_matrices[i] = np.eye(4)
+
+        # Soft bones usam identidade
+        soft_start = len(self.bones)
+        for i in range(len(self.soft_bones)):
+            idx = soft_start + i
+            if idx < count:
+                self.global_bind_pose_matrices[idx] = self.bind_pose_matrices[idx]
+                self.inverse_bind_pose_matrices[idx] = np.eye(4)
     
     def interpolate_animation_frame(self, animation, frame_time):
         """✅ INTERPOLAÇÃO HÍBRIDA: Funciona sempre"""
@@ -918,13 +1002,13 @@ class AnimationSystem:
                 pos_interp = pos_current if isinstance(pos_current, (list, tuple)) else (0, 0, 0)
             
             # ✅ INTERPOLAÇÃO DE ROTAÇÃO
-            rot_current = anim_bone.get('rots', {}).get(current_frame, (-1, 0, 0, 0))
+            rot_current = anim_bone.get('rots', {}).get(current_frame, (1, 0, 0, 0))
             rot_next = anim_bone.get('rots', {}).get(next_frame, rot_current)
             
             if isinstance(rot_current, (list, tuple)) and isinstance(rot_next, (list, tuple)) and len(rot_current) >= 4 and len(rot_next) >= 4:
                 rot_interp = self._slerp_quaternion(rot_current, rot_next, t)
             else:
-                rot_interp = rot_current if isinstance(rot_current, (list, tuple)) else (-1, 0, 0, 0)
+                rot_interp = rot_current if isinstance(rot_current, (list, tuple)) else (1, 0, 0, 0)
             
             interpolated_transforms[bone_idx] = {
                 'position': pos_interp,
@@ -983,45 +1067,42 @@ class AnimationSystem:
         return tuple(x / magnitude for x in q)
     
     def update_bone_matrices(self, animation, frame_time):
-        """✅ ATUALIZAÇÃO HÍBRIDA: Funciona com ou sem skin data"""
-        # Obter transformações interpoladas
+        """Atualizar hierarquia de bones usando offsets animados."""
         transforms = self.interpolate_animation_frame(animation, frame_time)
-        
-        # ✅ VERIFICAR SE TEMOS MATRIZES SUFICIENTES
-        if not self.current_pose_matrices:
-            # Criar matrizes básicas se não existirem
-            bone_count = len(animation.get('bones', []))
-            self.current_pose_matrices = [np.eye(4) for _ in range(bone_count)]
-            self.final_bone_matrices = [np.eye(4) for _ in range(bone_count)]
-        
-        # ✅ CALCULAR MATRIZES LOCAIS
-        for bone_idx in range(len(self.current_pose_matrices)):
-            local_matrix = np.eye(4)
-            
-            if bone_idx in transforms:
-                transform = transforms[bone_idx]
-                
-                # Aplicar rotação
-                rot_matrix = self._quaternion_to_matrix(transform['rotation'])
-                
-                # Aplicar posição
-                pos = transform['position']
-                rot_matrix[0, 3] = pos[0]
-                rot_matrix[1, 3] = pos[1]
-                rot_matrix[2, 3] = pos[2]
-                
-                local_matrix = rot_matrix
-            
-            self.current_pose_matrices[bone_idx] = local_matrix
-        
-        # ✅ CALCULAR MATRIZES FINAIS
-        if hasattr(self, 'bones') and self.bones:
-            # Modo completo com hierarquia
-            self._calculate_final_matrices()
-        else:
-            # Modo básico - copiar matrizes locais
-            for i in range(len(self.current_pose_matrices)):
-                self.final_bone_matrices[i] = self.current_pose_matrices[i].copy()
+
+        count = len(self.bind_pose_matrices)
+        if not self.current_pose_matrices or len(self.current_pose_matrices) != count:
+            self.current_pose_matrices = [np.eye(4) for _ in range(count)]
+            self.final_bone_matrices = [np.eye(4) for _ in range(count)]
+
+        global_mats = [np.eye(4) for _ in range(count)]
+
+        for i in range(len(self.bones)):
+            transform = transforms.get(i, {})
+            rot_matrix = self._quaternion_to_matrix(transform.get('rotation', (1, 0, 0, 0)))
+            pos = transform.get('position', (0, 0, 0))
+
+            bind_pos = self.bind_pose_matrices[i][:3, 3] if i < len(self.bind_pose_matrices) else (0, 0, 0)
+            rot_matrix[0, 3] = pos[0] + bind_pos[0]
+            rot_matrix[1, 3] = pos[1] + bind_pos[1]
+            rot_matrix[2, 3] = pos[2] + bind_pos[2]
+
+            self.current_pose_matrices[i] = rot_matrix
+
+            parent = self.bones[i].get('parent', -1)
+            if parent >= 0 and parent < count:
+                global_mats[i] = np.dot(global_mats[parent], rot_matrix)
+            else:
+                global_mats[i] = rot_matrix
+
+        soft_start = len(self.bones)
+        for idx, soft in enumerate(self.soft_bones):
+            mat_idx = soft_start + idx
+            if mat_idx < count:
+                global_mats[mat_idx] = self.bind_pose_matrices[mat_idx]
+
+        for i in range(count):
+            self.final_bone_matrices[i] = np.dot(global_mats[i], self.inverse_bind_pose_matrices[i])
     
     def _quaternion_to_matrix(self, q):
         """✅ CONVERSÃO MODERNA: Quaternion para matriz 4x4"""
@@ -1126,31 +1207,21 @@ class AnimationSystem:
                 continue
             
             # ✅ OBTER BONE E WEIGHT DO VÉRTICE
-            bone_idx = self.vertex_bone_mapping.get(i, 0)
-            weight = self.vertex_weights.get(i, 1.0)
-            
-            if bone_idx >= len(self.final_bone_matrices):
-                # ✅ FALLBACK: usar matriz identidade
-                transformed_vertices.append(vertex)
-                continue
-            
-            # ✅ VERIFICAR SE MATRIZ É VÁLIDA
-            bone_matrix = self.final_bone_matrices[bone_idx]
-            if bone_matrix is None:
-                bone_matrix = np.eye(4)
-            
-            # ✅ TRANSFORMAR VÉRTICE
+            bone_indices = self.vertex_bone_mapping.get(i, [0])
+            weights = self.vertex_weights.get(i, [1.0])
+
             try:
                 vertex_homogeneous = np.array([vertex[0], vertex[1], vertex[2], 1.0])
-                transformed = np.dot(bone_matrix, vertex_homogeneous)
-                
-                # ✅ APLICAR WEIGHT CORRETAMENTE (especialmente para soft bones)
-                if weight < 1.0 and skin_data:
-                    # Interpolar entre posição original e transformada
-                    original = np.array([vertex[0], vertex[1], vertex[2], 1.0])
-                    transformed = original * (1.0 - weight) + transformed * weight
-                
-                # Converter para coordenadas cartesianas
+                transformed = np.zeros(4)
+
+                for b_idx, w in zip(bone_indices, weights):
+                    if b_idx >= len(self.final_bone_matrices):
+                        continue
+                    bone_matrix = self.final_bone_matrices[b_idx]
+                    if bone_matrix is None:
+                        bone_matrix = np.eye(4)
+                    transformed += np.dot(bone_matrix, vertex_homogeneous) * w
+
                 if abs(transformed[3]) > 1e-6:
                     result = (
                         transformed[0] / transformed[3],
@@ -1159,11 +1230,10 @@ class AnimationSystem:
                     )
                 else:
                     result = (transformed[0], transformed[1], transformed[2])
-                
+
                 transformed_vertices.append(result)
-                
-            except Exception as e:
-                # Em caso de erro, usar vértice original
+
+            except Exception:
                 transformed_vertices.append(vertex)
         
         return transformed_vertices
@@ -1216,10 +1286,11 @@ class AnimationSystem:
         
         # Contar vértices por bone
         bone_vertex_count = {}
-        for vertex_idx, bone_idx in self.vertex_bone_mapping.items():
-            if bone_idx not in bone_vertex_count:
-                bone_vertex_count[bone_idx] = 0
-            bone_vertex_count[bone_idx] += 1
+        for vertex_idx, bone_list in self.vertex_bone_mapping.items():
+            for bone_idx in (bone_list if isinstance(bone_list, list) else [bone_list]):
+                if bone_idx not in bone_vertex_count:
+                    bone_vertex_count[bone_idx] = 0
+                bone_vertex_count[bone_idx] += 1
         
         print(f"   Bones utilizados: {len(bone_vertex_count)}")
         for bone_idx in sorted(bone_vertex_count.keys())[:5]:  # Primeiros 5
@@ -1229,7 +1300,12 @@ class AnimationSystem:
         
         # Debug de weights se disponível
         if hasattr(self, 'vertex_weights') and self.vertex_weights:
-            unique_weights = set(self.vertex_weights.values())
+            unique_weights = set()
+            for w_list in self.vertex_weights.values():
+                if isinstance(w_list, list):
+                    unique_weights.update(w_list)
+                else:
+                    unique_weights.add(w_list)
             print(f"   Weights únicos: {sorted(unique_weights)[:10]}")  # Primeiros 10
     
     def _clear_cache_if_needed(self):
@@ -1299,6 +1375,9 @@ class KEXCore:
         # 2. Tentar carregar skin (opcional)
         skin_path = os.path.splitext(mesh_path)[0] + ".skn"
         self.current_skin = self.skin.read_skn_file(skin_path)
+
+        # Se o skin define uma ordem específica de vértices, reordenar mesh
+        self._sync_mesh_skin_indices()
         
         # 3. Tentar carregar animações (opcional)
         anim_path = os.path.splitext(mesh_path)[0] + ".anims"
@@ -1306,7 +1385,10 @@ class KEXCore:
         
         # 4. Configurar sistema de animação
         if self.current_skin:
-            success = self.anim_system.setup_skeleton(self.current_skin)
+            success = self.anim_system.setup_skeleton(
+                self.current_skin,
+                self.current_animations if isinstance(self.current_animations, list) else None,
+            )
             if success:
                 print("✅ Sistema completo configurado")
             else:
@@ -1314,9 +1396,44 @@ class KEXCore:
         
         # 5. Carregar texturas
         self.textures = self.model3d.find_textures(mesh_path, self.current_mesh.get("texture_indices", set()))
-        
+
         print(f"✅ KEX Core: Carregamento concluído!")
         return True
+
+    def _sync_mesh_skin_indices(self):
+        """Aplicar vértices do skin ao mesh e validar índices."""
+        if not self.current_mesh or not self.current_skin:
+            return
+
+        verts = self.current_mesh.get('verts', {})
+        locs = verts.get('loc', [])
+        indices = self.current_skin.get('indices', [])
+        skin_verts = self.current_skin.get('verts', [])
+
+        # Aplicar vértices do SKN se o tamanho for compatível
+        if len(skin_verts) == len(locs):
+            try:
+                self.current_mesh['verts']['loc'] = skin_verts.copy()
+                print("🔧 Vértices substituídos pelos do SKN")
+            except Exception as e:
+                print(f"⚠️ Não foi possível aplicar vértices do SKN: {e}")
+
+        # Reordenar vértices somente se os índices indicarem claramente uma
+        # correspondência 1:1 com a mesh. No formato original, a lista de
+        # índices pode conter entradas duplicadas, então verificamos antes.
+        if len(indices) == len(locs) and len(set(indices)) == len(locs):
+            if indices != list(range(len(locs))):
+                try:
+                    reordered = [self.current_mesh['verts']['loc'][i] for i in indices]
+                    self.current_mesh['verts']['loc'] = reordered
+
+                    normals = self.current_mesh['verts'].get('normals', [])
+                    if len(normals) == len(indices):
+                        self.current_mesh['verts']['normals'] = [normals[i] for i in indices]
+
+                    print("🔧 Vértices reordenados conforme índices do SKN")
+                except Exception as e:
+                    print(f"⚠️ Erro ao reordenar vértices: {e}")
     
     def get_system_status(self):
         """Status completo do sistema"""
