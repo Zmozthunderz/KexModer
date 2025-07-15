@@ -345,8 +345,8 @@ class ModelViewer(QOpenGLWidget):
             anim = self.animations[self.current_animation]
             print(f"▶️ Iniciando animação '{anim['name']}'")
             self.elapsed.start()
-            # Intervalo 0 para disparos contínuos; controle via delta do timer
-            self.timer.start(0)
+            # Intervalo ~60 FPS para fluidez
+            self.timer.start(16)
         else:
             print("⏹️ Parando animação")
             self.timer.stop()

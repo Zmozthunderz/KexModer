@@ -770,6 +770,8 @@ class AnimationSystem:
         self.bind_pose_matrices = []
         self.current_pose_matrices = []
         self.final_bone_matrices = []
+        self.global_bind_pose_matrices = []
+        self.inverse_bind_pose_matrices = []
         
         # Cache para performance
         self._interpolation_cache = {}
@@ -809,9 +811,10 @@ class AnimationSystem:
         self.bind_pose_matrices = [np.eye(4) for _ in range(total_bones)]
         self.current_pose_matrices = [np.eye(4) for _ in range(total_bones)]
         self.final_bone_matrices = [np.eye(4) for _ in range(total_bones)]
-        
+
         # ✅ CALCULAR BIND POSES CORRETAS
         self._calculate_correct_bind_poses(skin_data, animations)
+        self._compute_bind_pose_hierarchy()
         
         print(f"✅ Sistema de animação configurado!")
         print(f"   Hierarquia: {len(self.bone_hierarchy)} pais")
@@ -935,6 +938,38 @@ class AnimationSystem:
                     self.bind_pose_matrices[soft_idx] = np.eye(4)
             else:
                 self.bind_pose_matrices[soft_idx] = np.eye(4)
+
+    def _compute_bind_pose_hierarchy(self):
+        """Calcular matrizes globais e inversas de bind pose."""
+        count = len(self.bind_pose_matrices)
+        self.global_bind_pose_matrices = [np.eye(4) for _ in range(count)]
+        self.inverse_bind_pose_matrices = [np.eye(4) for _ in range(count)]
+
+        for i in range(len(self.bones)):
+            parent = self.bones[i].get('parent', -1)
+            local = self.bind_pose_matrices[i]
+            if parent >= 0 and parent < count:
+                self.global_bind_pose_matrices[i] = np.dot(
+                    self.global_bind_pose_matrices[parent], local
+                )
+            else:
+                self.global_bind_pose_matrices[i] = local.copy()
+
+        for i in range(len(self.bones)):
+            try:
+                self.inverse_bind_pose_matrices[i] = np.linalg.inv(
+                    self.global_bind_pose_matrices[i]
+                )
+            except Exception:
+                self.inverse_bind_pose_matrices[i] = np.eye(4)
+
+        # Soft bones usam identidade
+        soft_start = len(self.bones)
+        for i in range(len(self.soft_bones)):
+            idx = soft_start + i
+            if idx < count:
+                self.global_bind_pose_matrices[idx] = self.bind_pose_matrices[idx]
+                self.inverse_bind_pose_matrices[idx] = np.eye(4)
     
     def interpolate_animation_frame(self, animation, frame_time):
         """✅ INTERPOLAÇÃO HÍBRIDA: Funciona sempre"""
@@ -1032,45 +1067,42 @@ class AnimationSystem:
         return tuple(x / magnitude for x in q)
     
     def update_bone_matrices(self, animation, frame_time):
-        """✅ ATUALIZAÇÃO HÍBRIDA: Funciona com ou sem skin data"""
-        # Obter transformações interpoladas
+        """Atualizar hierarquia de bones usando offsets animados."""
         transforms = self.interpolate_animation_frame(animation, frame_time)
-        
-        # ✅ VERIFICAR SE TEMOS MATRIZES SUFICIENTES
-        if not self.current_pose_matrices:
-            # Criar matrizes básicas se não existirem
-            bone_count = len(animation.get('bones', []))
-            self.current_pose_matrices = [np.eye(4) for _ in range(bone_count)]
-            self.final_bone_matrices = [np.eye(4) for _ in range(bone_count)]
-        
-        # ✅ CALCULAR MATRIZES LOCAIS
-        for bone_idx in range(len(self.current_pose_matrices)):
-            local_matrix = np.eye(4)
-            
-            if bone_idx in transforms:
-                transform = transforms[bone_idx]
-                
-                # Aplicar rotação
-                rot_matrix = self._quaternion_to_matrix(transform['rotation'])
-                
-                # Aplicar posição
-                pos = transform['position']
-                rot_matrix[0, 3] = pos[0]
-                rot_matrix[1, 3] = pos[1]
-                rot_matrix[2, 3] = pos[2]
-                
-                local_matrix = rot_matrix
-            
-            self.current_pose_matrices[bone_idx] = local_matrix
-        
-        # ✅ CALCULAR MATRIZES FINAIS
-        if hasattr(self, 'bones') and self.bones:
-            # Modo completo com hierarquia
-            self._calculate_final_matrices()
-        else:
-            # Modo básico - copiar matrizes locais
-            for i in range(len(self.current_pose_matrices)):
-                self.final_bone_matrices[i] = self.current_pose_matrices[i].copy()
+
+        count = len(self.bind_pose_matrices)
+        if not self.current_pose_matrices or len(self.current_pose_matrices) != count:
+            self.current_pose_matrices = [np.eye(4) for _ in range(count)]
+            self.final_bone_matrices = [np.eye(4) for _ in range(count)]
+
+        global_mats = [np.eye(4) for _ in range(count)]
+
+        for i in range(len(self.bones)):
+            transform = transforms.get(i, {})
+            rot_matrix = self._quaternion_to_matrix(transform.get('rotation', (1, 0, 0, 0)))
+            pos = transform.get('position', (0, 0, 0))
+
+            bind_pos = self.bind_pose_matrices[i][:3, 3] if i < len(self.bind_pose_matrices) else (0, 0, 0)
+            rot_matrix[0, 3] = pos[0] + bind_pos[0]
+            rot_matrix[1, 3] = pos[1] + bind_pos[1]
+            rot_matrix[2, 3] = pos[2] + bind_pos[2]
+
+            self.current_pose_matrices[i] = rot_matrix
+
+            parent = self.bones[i].get('parent', -1)
+            if parent >= 0 and parent < count:
+                global_mats[i] = np.dot(global_mats[parent], rot_matrix)
+            else:
+                global_mats[i] = rot_matrix
+
+        soft_start = len(self.bones)
+        for idx, soft in enumerate(self.soft_bones):
+            mat_idx = soft_start + idx
+            if mat_idx < count:
+                global_mats[mat_idx] = self.bind_pose_matrices[mat_idx]
+
+        for i in range(count):
+            self.final_bone_matrices[i] = np.dot(global_mats[i], self.inverse_bind_pose_matrices[i])
     
     def _quaternion_to_matrix(self, q):
         """✅ CONVERSÃO MODERNA: Quaternion para matriz 4x4"""
