@@ -42,9 +42,9 @@ except ImportError as e:
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QPushButton, QTextEdit, QFileDialog, QLabel, QGroupBox, 
-        QComboBox, QCheckBox, QSlider, QSpinBox, QListWidget, 
-        QSplitter, QTabWidget
+        QPushButton, QTextEdit, QFileDialog, QLabel, QGroupBox,
+        QComboBox, QCheckBox, QSlider, QSpinBox, QListWidget,
+        QSplitter, QTabWidget, QSizePolicy
     )
     from PySide6.QtOpenGLWidgets import QOpenGLWidget
     from PySide6.QtCore import Qt, QTimer, QElapsedTimer
@@ -951,6 +951,7 @@ class MainWindow(QMainWindow):
         # Painel de controles
         controls_widget = QWidget()
         controls_widget.setMaximumWidth(400)
+        controls_widget.setMinimumWidth(300)
         controls_layout = QVBoxLayout(controls_widget)
         
         # Botão de carregamento
@@ -1005,7 +1006,8 @@ class MainWindow(QMainWindow):
         # Lista de animações
         anim_layout.addWidget(QLabel("📽️ Animações:"))
         self.anim_list = QListWidget()
-        self.anim_list.setMaximumHeight(120)
+        self.anim_list.setMinimumHeight(150)
+        self.anim_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.anim_list.currentRowChanged.connect(self.select_animation)
         anim_layout.addWidget(self.anim_list)
         
@@ -1014,8 +1016,10 @@ class MainWindow(QMainWindow):
         self.play_button = QPushButton("▶️ Play")
         self.play_button.setStyleSheet("background-color: #4CAF50; color: white;")
         self.play_button.clicked.connect(self.start_animation)
+        self.play_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.stop_button = QPushButton("⏹️ Stop")
         self.stop_button.setStyleSheet("background-color: #f44336; color: white;")
+        self.stop_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.stop_button.clicked.connect(self.stop_animation)
         play_layout.addWidget(self.play_button)
         play_layout.addWidget(self.stop_button)
