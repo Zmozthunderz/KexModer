@@ -3,8 +3,15 @@ import os
 import math
 import sys
 import time
-import numpy as np
 from collections import defaultdict
+
+# --- Optional dependency: NumPy ---
+try:
+    import numpy as np  # type: ignore
+    NUMPY_OK = True
+except Exception as e:  # pragma: no cover - handled at runtime
+    NUMPY_OK = False
+    _NUMPY_IMPORT_ERR = e
 
 # --- OpenGL/Qt imports (GUI) ---
 try:
@@ -1055,7 +1062,12 @@ class MainWindow(QMainWindow if PYSIDE_OK else object):
 
 def analyze_shadowman_files(base_path):
     """Função principal para analisar arquivos Shadow Man (CLI)"""
-    
+    if not NUMPY_OK:
+        print("ERRO: Esta ferramenta requer NumPy instalado.")
+        print("Detalhe:", _NUMPY_IMPORT_ERR)
+        print("Instale com:\n  pip install numpy")
+        sys.exit(2)
+
     analyzer = ShadowManAdvancedAnalyzer()
     results = analyzer.analyze_all_formats(base_path)
     
@@ -1081,6 +1093,11 @@ def analyze_shadowman_files(base_path):
     return results
 
 def _run_gui():
+    if not NUMPY_OK:
+        print("ERRO: A interface requer NumPy instalado.")
+        print("Detalhe:", _NUMPY_IMPORT_ERR)
+        print("Instale com:\n  pip install numpy")
+        sys.exit(2)
     if not PYSIDE_OK:
         print("ERRO: A interface requer PySide6 e PyOpenGL instalados.")
         print("Detalhe:", _GUI_IMPORT_ERR)
